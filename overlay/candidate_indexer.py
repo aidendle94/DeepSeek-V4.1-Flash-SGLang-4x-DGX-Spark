@@ -13,18 +13,21 @@ prefill and decode, built with the factory's own arguments and its own DeepGEMM-
 it calls the stock factory. The capability is read when the backend is built (inside the worker, CUDA already set up),
 never at import.
 
-Decode scoring. Below SM100 the dense-blocks backend scores a decode row with `fp4_index_logits_decode`, a Triton
-kernel that reads every visible compressed slot through the page table with bf16 queries; on GB10 at a 64K context the
-indexers of one decode step took 10.2 ms with it, against 0.9 ms on the previous base, which scored the same rows with
-DeepGEMM's paged fp4 MQA logits (`fp8_fp4_paged_mqa_logits`, fp4 queries; the DeepGEMM plan is forced for compress
-ratios 1 and 2 on SM120 by indexer_schedule). With SPARK_CANDIDATE_DG_DECODE=1 the backend's decode scores come from
-that DeepGEMM call, made exactly as SGLang's full top-k indexer makes it, sliced to the same width, with positions at or
-past each row's length set to -inf as the Triton kernel returns them; slots, block selection and top-k are SGLang's.
-The scores are the previous base's (fp4 queries), not bit-identical to the Triton kernel's (bf16 queries). Rows the
-metadata splits into chunks (a list of DeepGEMM plans) and SM90 keep the stock scorer.
+Decode scoring. The dense-blocks backend scores a decode row in one of two ways. Its "paged" branch (SGLang enables it
+on SM90 only) runs `fp4_index_logits_paged`, a Triton kernel with persistent workers that reads only each row's visible
+compressed positions straight from the request table and, for the layers that consume the published candidates, only
+inside the candidate blocks; the top-k then runs on SGLang's top-k v2 kernels. Every other device takes the dense-slot
+branch: a [rows, width] slot gather and `fp4_index_logits_decode` over the whole graph width (524,555 positions at
+compress ratio 1 for a 512K context), then torch top-k and block selection, again in full for every consumer. On GB10
+at a 64K context the indexers of one decode step took 10.2-10.5 ms that way, against 0.9 ms on the previous base.
+With SPARK_CANDIDATE_DECODE=paged (default) the backend takes SGLang's paged branch on SM12x as well: the wrapper below
+is that branch of `scoring.decode_scores` (SGLang, Copyright SGLang Team, Apache License 2.0), entered on SM12x instead
+of SM90 only; the kernels are portable (Triton, and the top-k v2 kernels SGLang's full top-k indexer already runs on
+SM12x). The scores are the same function of the same inputs as the dense-slot kernel's ("the FP4 decoding and BF16
+rounding are shared with the dense-slot path"). SPARK_CANDIDATE_DECODE=stock keeps SGLang's choice.
 
-  SPARK_CANDIDATE_DENSE      1 (default): dense-blocks candidate indexer on SM12x; 0: SGLang's choice
-  SPARK_CANDIDATE_DG_DECODE  1 (default): DeepGEMM paged logits for its decode scores on SM12x; 0: SGLang's Triton kernel
+  SPARK_CANDIDATE_DENSE    1 (default): dense-blocks candidate indexer on SM12x; 0: SGLang's choice
+  SPARK_CANDIDATE_DECODE   paged (default) | stock: decode scoring branch of the dense-blocks backend on SM12x
 
 MIT License, Copyright (c) 2026 Aiden Le.
 """
@@ -64,49 +67,49 @@ def install(module) -> None:
         return dense, dense
 
     module.make_candidate_indexer = make_candidate_indexer
-    if os.environ.get("SPARK_CANDIDATE_DG_DECODE", "1") == "1":
-        _install_dg_decode()
+    if os.environ.get("SPARK_CANDIDATE_DECODE", "paged") == "paged":
+        _install_paged_decode()
 
 
-def _install_dg_decode() -> None:
-    """Wrap dense_blocks' binding of scoring.decode_scores (see the module docstring)."""
-    from sglang.kernels.ops.attention.dsv4.index_logits import deep_gemm_fp4_paged_mqa_logits
-    from sglang.srt.layers.attention.dsv4.v41_indexer import dense_blocks
-    from sglang.srt.layers.attention.dsv4.v41_indexer.scoring import DecodeScores, get_deep_gemm_decode_data
+def _install_paged_decode() -> None:
+    """Wrap dense_blocks' binding of scoring.decode_scores: SGLang's paged branch on SM12x (see the module docstring)."""
+    from sglang.srt.layers.attention.dsv4.v41_indexer import dense_blocks, scoring
 
     stock = dense_blocks.decode_scores
     state = {"logged": False}
 
     def decode_scores(*, inputs, token_to_kv_pool, req_to_token, candidate_mask=None, compute_topk_plan=True, **extra):
-        md = inputs.paged_metadata
-        dgm = getattr(md, "deep_gemm_metadata", None)
-        if (extra or dgm is None or isinstance(dgm, list) or torch.cuda.get_device_capability()[0] != 12):
+        if extra or torch.cuda.get_device_capability()[0] != 12:
             return stock(inputs=inputs, token_to_kv_pool=token_to_kv_pool, req_to_token=req_to_token,
                          candidate_mask=candidate_mask, compute_topk_plan=compute_topk_plan, **extra)
+        # From here: the `paged` branch of sglang.srt.layers.attention.dsv4.v41_indexer.scoring.decode_scores.
+        pool = token_to_kv_pool
+        ratio = inputs.compress_ratio
+        indexer = inputs.indexer
         req, pos = inputs.req_rows, inputs.positions
         bs = req.shape[0]
         assert pos.shape[0] == bs, f"decode expects one token per request, {pos.shape=} {bs=}"
         if bs == 0:
             inputs.reset_outputs()
             return None
-        ratio = inputs.compress_ratio
         lens = (pos + 1) // ratio
-        lmax = min(md.max_compressed_seq_len, req_to_token.shape[1] // ratio)
+        metadata = inputs.paged_metadata
+        lmax = min(metadata.max_compressed_seq_len, req_to_token.shape[1] // ratio)
         if lmax == 0:
             inputs.reset_outputs()
             return None
-        data = get_deep_gemm_decode_data(inputs, token_to_kv_pool)
-        logits = deep_gemm_fp4_paged_mqa_logits((data.q_fp4, data.q_sf), data.k_cache, data.weights,
-                                                md.compressed_seq_lens, md.page_table, dgm, md.max_compressed_seq_len)
-        inputs.reset_outputs()
-        j = torch.arange(lmax, device=pos.device)
-        valid = j[None, :] < lens[:, None]
-        slots = req_to_token[req[:, None], (j * ratio)[None, :]].to(torch.int64) // ratio
-        slots = slots.masked_fill(~valid, 0)
-        scores = logits[:, :lmax].float().masked_fill(~valid, float("-inf")).contiguous()
+        q = indexer.queries(inputs.q_lora, inputs.freqs_cis[pos])
+        weights = indexer.head_weights(inputs.x)
+        table = pool.get_index_k_with_scale_buffer(inputs.layer_id)
+        lens = lens.to(torch.int32)
+        plan = scoring.plan_topk_v2(lens) if compute_topk_plan else None
+        scores = scoring.fp4_index_logits_paged(q, weights, req, req_to_token, lens, table, table.shape[1] // 68,
+                                                lmax, ratio, candidate_mask)
         if not state["logged"]:
             state["logged"] = True
-            logger.info("candidate indexer decode scores on SM12x: DeepGEMM paged fp4 logits (ratio %d, width %d)", ratio, lmax)
-        return DecodeScores(bs=bs, lmax=lmax, lens=lens, slots=slots, scores=scores)
+            logger.info("candidate indexer decode on SM12x: paged scoring (ratio %d, capacity %d, candidate mask %s)",
+                        ratio, lmax, candidate_mask is not None)
+        return scoring.PagedDecodeScores(bs=bs, lmax=lmax, lens=lens, scores=scores, req=req, req_to_token=req_to_token,
+                                         ratio=ratio, plan=plan, has_candidate_mask=candidate_mask is not None)
 
     dense_blocks.decode_scores = decode_scores
