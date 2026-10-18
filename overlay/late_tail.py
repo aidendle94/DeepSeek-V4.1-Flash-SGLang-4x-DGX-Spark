@@ -239,5 +239,6 @@ def install_runner(module) -> None:
             _T.update(n=0, fwd=0.0, tail=0.0, tokens=0, last=now)
         return out
 
+    forward.__wrapped__ = stock
     cls.forward = forward
     logger.info("late tail timers on (one sync per prefill forward)")

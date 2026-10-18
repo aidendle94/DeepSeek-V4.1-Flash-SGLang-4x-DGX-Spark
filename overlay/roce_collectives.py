@@ -128,6 +128,17 @@ class _Runtime:
 _TP: _Runtime | None = None
 
 
+def _prepare(rt, dtypes) -> None:
+    """Compile the launchers and allocate the scratch before a CUDA-graph capture (both are refused inside one).
+    b12x 1.3.0 exposed this as `AllReduce.prepare(dtypes)`; the b12x in FlashInfer (>= 0.7.2) does the same work in
+    `_prepare_resources(dtypes, padded_gather=True)`, which is what its own preparation session calls."""
+    prepare = getattr(rt, "prepare", None)
+    if prepare is not None:
+        prepare(dtypes)
+    else:
+        rt._prepare_resources(dtypes, padded_gather=True)
+
+
 def install(module) -> None:
     """Patch sglang.srt.distributed.parallel_state.GroupCoordinator."""
     if not _enabled():
@@ -172,7 +183,7 @@ def install(module) -> None:
         rt = getattr(self, "roce", None)
         with stock_capture(self, graph_capture_context, stream) as ctx:
             if rt is not None and rt.rt is not None:
-                rt.rt.prepare((torch.bfloat16, torch.float16, torch.float32))
+                _prepare(rt.rt, (torch.bfloat16, torch.float16, torch.float32))
                 with rt.rt.capture(stream=ctx.stream):
                     yield ctx
             else:
@@ -204,4 +215,5 @@ def install_health(module) -> None:
             _TP.check_health()
         return out
 
+    forward.__wrapped__ = stock
     cls.forward = forward

@@ -14,13 +14,11 @@ COPY licenses /opt/dsv41-spark/licenses
 COPY overlay /opt/dsv41-spark/overlay
 COPY tests /opt/dsv41-spark/tests
 COPY vendor /opt/dsv41-spark/vendor
-# b12x (Apache-2.0): the package from PyPI for its compiler/runtime helpers, plus the comm/roce one-shot RDMA
-# runtime from the pinned revision b58f34ea (API_VERSION 1), proxy compiled here so no compiler runs at start.
-RUN set -eux; pip install --no-deps -q /opt/dsv41-spark/vendor/b12x-1.3.0-py3-none-any.whl \
- && B=$(python3 -c "import b12x, os; print(os.path.dirname(b12x.__file__))") \
- && tmp=$(mktemp -d) && tar -xzf /opt/dsv41-spark/vendor/b12x-b58f34ea.tgz -C "$tmp" --strip-components=1 \
- && rm -rf "$B/comm/roce" && cp -r "$tmp/b12x/comm/roce" "$B/comm/roce" && cp "$tmp/b12x/comm/__init__.py" "$B/comm/__init__.py" \
- && rm -rf "$tmp" && mkdir -p /opt/dsv41-spark/roce-cache \
+# b12x (Apache-2.0) ships inside the base's FlashInfer 0.7.2 (flashinfer/experimental/b12x, imported as `b12x`; the
+# standalone package is archived). Its comm/roce one-shot RDMA runtime is used as is; the proxy is compiled here so no
+# compiler runs at start. Never pip-install the standalone b12x over it: both provide the same top-level package.
+RUN set -eux; python3 -c "import b12x, flashinfer, os; assert 'flashinfer' in b12x.__file__ or os.path.isdir(os.path.join(os.path.dirname(flashinfer.__file__), 'experimental', 'b12x')), b12x.__file__" \
+ && mkdir -p /opt/dsv41-spark/roce-cache \
  && B12X_ROCE_CACHE_DIR=/opt/dsv41-spark/roce-cache python3 -c "from b12x.comm.roce import _proxy; print('roce proxy', _proxy.load())" \
  && python3 -c "from b12x.comm import roce; assert roce.API_VERSION == 1, roce.API_VERSION"
 ENV B12X_ROCE_CACHE_DIR=/opt/dsv41-spark/roce-cache
