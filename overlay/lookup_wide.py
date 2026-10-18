@@ -51,6 +51,11 @@ ACTIVE = ld._ENABLED and ld._MODE == "wide"
 # and the token-keyed graph buckets below, and nothing else from this module.
 CAP = os.environ.get("SPARK_VERIFY_CAP", "0") == "1" and not ACTIVE
 RAGGED = ACTIVE or CAP
+# Forward generation: bumped at the start of every target-model forward (eager, warm-up or graph capture). The ragged
+# row memo below is valid only inside the forward that computed it; a memo carried from one forward into another (the
+# warm-up batch object is reused by the capture) baked one graph's tensors into another graph and read freed memory
+# (window 44: illegal memory access at the first decode).
+_GEN = [0]
 EXT_BUDGET = int(os.environ.get("SPARK_LOOKUP_EXT_BUDGET", "20"))
 EXT_TIERS = tuple(sorted({*range(0, EXT_BUDGET + 1, 10), EXT_BUDGET})) if EXT_BUDGET >= 10 else (0, EXT_BUDGET)
 SYNC_GATE = os.environ.get("SPARK_LOOKUP_SYNC_GATE", "0") == "1"
@@ -267,11 +272,11 @@ def _ragged_rows(forward_batch, num_tokens: int):
     if layout is None:
         return None
     memo = getattr(forward_batch, "_spark_ragged_rows", None)
-    if memo is not None and memo[0] is layout and memo[1] == num_tokens:
+    if memo is not None and memo[0] is layout and memo[1] == num_tokens and memo[3] == _GEN[0]:
         return memo[2]
     out = _ragged_rows_compute(forward_batch, layout, num_tokens)
     try:
-        forward_batch._spark_ragged_rows = (layout, num_tokens, out)
+        forward_batch._spark_ragged_rows = (layout, num_tokens, out, _GEN[0])
     except AttributeError:  # a slotted batch type: no memo, still correct
         pass
     return out
@@ -287,6 +292,21 @@ def _ragged_rows_compute(forward_batch, layout, num_tokens: int):
     return layout, row, indptr[:nb]
 
 
+def install_forward_gen(module) -> None:
+    """models.deepseek_v4: bump the forward generation at the start of every model forward (see _GEN)."""
+    if not RAGGED:
+        return
+    cls = module.DeepseekV4ForCausalLM
+    stock = cls.forward
+
+    def forward(self, *args, **kwargs):
+        _GEN[0] += 1
+        return stock(self, *args, **kwargs)
+
+    forward.__wrapped__ = stock
+    cls.forward = forward
+
+
 def install_dsv41_sparse(module) -> None:
     """layers.attention.dsv4.dsv41_sparse: token -> request map for ragged verify (stock repeats a uniform block)."""
     if not RAGGED:
@@ -299,11 +319,11 @@ def install_dsv41_sparse(module) -> None:
             ragged = _ragged_rows(forward_batch, n)
             if ragged is not None:
                 memo = getattr(forward_batch, "_spark_req_idx", None)
-                if memo is not None and memo[0] is ragged[1]:
+                if memo is not None and memo[0] is ragged[1] and memo[2] == _GEN[0]:
                     return memo[1]
                 req = forward_batch.req_pool_indices.to(ragged[1].dtype)[ragged[1]]
                 try:
-                    forward_batch._spark_req_idx = (ragged[1], req)
+                    forward_batch._spark_req_idx = (ragged[1], req, _GEN[0])
                 except AttributeError:
                     pass
                 return req
