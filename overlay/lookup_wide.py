@@ -46,6 +46,11 @@ import lookup_draft as ld
 logger = logging.getLogger(__name__)
 
 ACTIVE = ld._ENABLED and ld._MODE == "wide"
+# SPARK_VERIFY_CAP=1 (verify_cap.py) runs SGLang's own compact verify planner (per-request verify lengths from the
+# draft's confidence head) without the lookup drafter: it needs the ragged Engram hasher, the ragged token -> request map
+# and the token-keyed graph buckets below, and nothing else from this module.
+CAP = os.environ.get("SPARK_VERIFY_CAP", "0") == "1" and not ACTIVE
+RAGGED = ACTIVE or CAP
 EXT_BUDGET = int(os.environ.get("SPARK_LOOKUP_EXT_BUDGET", "20"))
 EXT_TIERS = tuple(sorted({*range(0, EXT_BUDGET + 1, 10), EXT_BUDGET})) if EXT_BUDGET >= 10 else (0, EXT_BUDGET)
 SYNC_GATE = os.environ.get("SPARK_LOOKUP_SYNC_GATE", "0") == "1"
@@ -197,14 +202,18 @@ def _rewrite(module, fn, replacements):
 
 
 def install_graph_runner(module) -> None:
-    """model_executor.runner.decode_cuda_graph_runner: compact verify graphs at 6b, 6b+10, 6b+20 tokens."""
-    if not ACTIVE:
+    """model_executor.runner.decode_cuda_graph_runner: compact verify graphs at 6b, 6b+10, 6b+20 tokens (wide), or at
+    the verify-cap buckets (verify_cap.cap_buckets: every count to 12, then 6b - 3 and 6b)."""
+    if not RAGGED:
         return
     cls = module.DecodeCudaGraphRunner
 
     def _build_ragged_verify_token_buckets(self):
         narrow = _base() + 1
         limit = self.max_bs * self.captured_req_width            # rows of the shared logits buffer
+        if CAP:
+            import verify_cap
+            return verify_cap.cap_buckets(self.capture_bs, self.captured_req_width, limit)
         return sorted({b * narrow + e for b in self.capture_bs for e in EXT_TIERS if b * narrow + e <= limit})
 
     def _spark_capture_sizes(self):
@@ -263,7 +272,7 @@ def _ragged_rows(forward_batch, num_tokens: int):
 
 def install_dsv41_sparse(module) -> None:
     """layers.attention.dsv4.dsv41_sparse: token -> request map for ragged verify (stock repeats a uniform block)."""
-    if not ACTIVE:
+    if not RAGGED:
         return
     stock = module.token_req_indices
 
@@ -281,7 +290,7 @@ def install_dsv41_sparse(module) -> None:
 def install_engram(module) -> None:
     """layers.engram: hash ids of a ragged verify batch through the extend path (per-token row + run starts), with no
     history commit (verify commits after acceptance, in commit_after_verify)."""
-    if not ACTIVE:
+    if not RAGGED:
         return
     cls = module.EngramHasher
     stock = cls.forward
