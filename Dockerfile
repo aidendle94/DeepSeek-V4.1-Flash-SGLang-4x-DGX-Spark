@@ -3,7 +3,7 @@
 # (Engram tables from node-local NVMe inside the CUDA graph, next-chunk prefetch, the b12x MXFP8 kernel, two SM120
 # fixes, an allocator flush, one-shot RDMA collectives, served-model aliases; see README). Build on a Spark (arm64):
 #   docker build -t sglang-dsv41-spark:local .
-# The published tag aidendle94/sparkrun-sglang-dsv41-gb10:production-1.7 is this file built on the pinned base.
+# The published tag aidendle94/sparkrun-sglang-dsv41-gb10:production-1.8 is this file built on the pinned base.
 # Pinned by digest: lmsysorg/sglang:nightly-dev-cu13-20261018-b234b5c3 (SGLang main b234b5c32, 2026-10-17; torch 2.14.1,
 # CUDA 13.0, Triton 3.8.0, FlashInfer 0.7.2, sgl-deep-gemm 0.2.2, sglang-kernel 0.4.10). Until production-1.7.1 the base
 # was dev-dsv41 (sha256:4a5d132a…, SGLang da64c5cb, 2026-09-11).
