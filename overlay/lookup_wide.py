@@ -254,7 +254,11 @@ def install_graph_runner(module) -> None:
 
 def _ragged_rows(forward_batch, num_tokens: int):
     """(layout, row [T], starts [bs]) of a compact target-verify batch, or None. Fixed shapes (graph-capturable): the
-    row of token t is found in the layout's qo_indptr; tokens past the covered total land on the last row."""
+    row of token t is found in the layout's qo_indptr; tokens past the covered total land on the last row.
+
+    Memoised on the forward batch per (layout, num_tokens): SGLang hoists its token -> request map into the attention
+    metadata for decode only, so in target verify every low-ratio layer asks again (38 of 40 layers); one searchsorted
+    chain per step instead of one per layer (window 42: compact verify spent ~2.5 ms more outside attention/MoE)."""
     import torch
     from sglang.srt.speculative.ragged_verify import resolve_ragged_verify_layout
     if not forward_batch.forward_mode.is_target_verify():
@@ -262,6 +266,19 @@ def _ragged_rows(forward_batch, num_tokens: int):
     layout = resolve_ragged_verify_layout(forward_batch)
     if layout is None:
         return None
+    memo = getattr(forward_batch, "_spark_ragged_rows", None)
+    if memo is not None and memo[0] is layout and memo[1] == num_tokens:
+        return memo[2]
+    out = _ragged_rows_compute(forward_batch, layout, num_tokens)
+    try:
+        forward_batch._spark_ragged_rows = (layout, num_tokens, out)
+    except AttributeError:  # a slotted batch type: no memo, still correct
+        pass
+    return out
+
+
+def _ragged_rows_compute(forward_batch, layout, num_tokens: int):
+    import torch
     bs = int(forward_batch.req_pool_indices.shape[0])
     indptr = layout.qo_indptr_device.to(torch.int64)
     nb = min(int(indptr.numel()) - 1, bs)
@@ -281,7 +298,15 @@ def install_dsv41_sparse(module) -> None:
             n = num_tokens if num_tokens is not None else int(forward_batch.positions.shape[0])
             ragged = _ragged_rows(forward_batch, n)
             if ragged is not None:
-                return forward_batch.req_pool_indices.to(ragged[1].dtype)[ragged[1]]
+                memo = getattr(forward_batch, "_spark_req_idx", None)
+                if memo is not None and memo[0] is ragged[1]:
+                    return memo[1]
+                req = forward_batch.req_pool_indices.to(ragged[1].dtype)[ragged[1]]
+                try:
+                    forward_batch._spark_req_idx = (ragged[1], req)
+                except AttributeError:
+                    pass
+                return req
         return stock(forward_batch, num_tokens=num_tokens)
 
     module.token_req_indices = token_req_indices
