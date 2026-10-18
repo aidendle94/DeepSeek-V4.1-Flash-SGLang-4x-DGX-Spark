@@ -1,11 +1,13 @@
 # DeepSeek-V4.1-Flash on 4x DGX Spark with SGLang — overlay image.
-# Base: the SGLang team's DeepSeek-V4.1 image (Apache-2.0), unmodified. The overlay adds eight import hooks
+# Base: the SGLang team's nightly image (Apache-2.0), unmodified. The overlay adds eight import hooks
 # (Engram tables from node-local NVMe inside the CUDA graph, next-chunk prefetch, the b12x MXFP8 kernel, two SM120
 # fixes, an allocator flush, one-shot RDMA collectives, served-model aliases; see README). Build on a Spark (arm64):
 #   docker build -t sglang-dsv41-spark:local .
 # The published tag aidendle94/sparkrun-sglang-dsv41-gb10:production-1.7 is this file built on the pinned base.
-# Pinned by digest: dev-dsv41 is a moving tag (docker pull lmsysorg/sglang:dev-dsv41 gave this digest on 2026-09-11).
-ARG BASE=lmsysorg/sglang@sha256:4a5d132a06a77c8331e15845f2e925adc788b00105097ad55409afa3f4fa4860
+# Pinned by digest: lmsysorg/sglang:nightly-dev-cu13-20261018-b234b5c3 (SGLang main b234b5c32, 2026-10-17; torch 2.14.1,
+# CUDA 13.0, Triton 3.8.0, FlashInfer 0.7.2, sgl-deep-gemm 0.2.2, sglang-kernel 0.4.10). Until production-1.7.1 the base
+# was dev-dsv41 (sha256:4a5d132a…, SGLang da64c5cb, 2026-09-11).
+ARG BASE=lmsysorg/sglang@sha256:bfef46e5a45a815f8c2f88a722980baf47b71a8689b89c6cc738f596ceeaf47c
 FROM ${BASE}
 COPY LICENSE NOTICE /opt/dsv41-spark/
 COPY licenses /opt/dsv41-spark/licenses
