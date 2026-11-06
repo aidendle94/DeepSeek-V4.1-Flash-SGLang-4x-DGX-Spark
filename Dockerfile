@@ -1,7 +1,8 @@
 # DeepSeek-V4.1-Flash on 4x DGX Spark with SGLang — overlay image.
-# Base: the SGLang team's nightly image (Apache-2.0), unmodified. The overlay adds eight import hooks
-# (Engram tables from node-local NVMe inside the CUDA graph, next-chunk prefetch, the b12x MXFP8 kernel, two SM120
-# fixes, an allocator flush, one-shot RDMA collectives, served-model aliases; see README). Build on a Spark (arm64):
+# Base: the SGLang team's nightly image (Apache-2.0), unmodified. The overlay adds import hooks (Engram tables from
+# node-local NVMe inside the CUDA graph, next-chunk prefetch, the b12x MXFP8 kernel, the SM12x candidate indexer and
+# prefill fixes, allocator and page-cache releases, one-shot RDMA collectives, served-model aliases; see README).
+# Build on a Spark (arm64):
 #   docker build -t sglang-dsv41-spark:local .
 # The published tag aidendle94/sparkrun-sglang-dsv41-gb10:production-1.8 is this file built on the pinned base.
 # Pinned by digest: lmsysorg/sglang:nightly-dev-cu13-20261018-b234b5c3 (SGLang main b234b5c32, 2026-10-17; torch 2.14.1,
@@ -14,6 +15,7 @@ COPY licenses /opt/dsv41-spark/licenses
 COPY overlay /opt/dsv41-spark/overlay
 COPY tests /opt/dsv41-spark/tests
 COPY vendor /opt/dsv41-spark/vendor
+# (vendor/ is the b12x release production-1.7.1 installed; kept for provenance, not installed since production-1.8)
 # b12x (Apache-2.0) ships inside the base's FlashInfer 0.7.2 (flashinfer/experimental/b12x, imported as `b12x`; the
 # standalone package is archived). Its comm/roce one-shot RDMA runtime is used as is; the proxy is compiled here so no
 # compiler runs at start. Never pip-install the standalone b12x over it: both provide the same top-level package.

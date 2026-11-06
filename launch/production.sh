@@ -21,5 +21,7 @@ if [ "${WIDE:-0}" = 1 ]; then
          RAGGED_VERIFY_MODE="${RAGGED_VERIFY_MODE:-compact}" LOOKUP_SYNC_GATE="${LOOKUP_SYNC_GATE:-1}" \
          LOOKUP_NARROW_SLOTS="${LOOKUP_NARROW_SLOTS:-1}" LOOKUP_FUSED_C2="${LOOKUP_FUSED_C2:-1}"
 fi
+# Prometheus metrics on /metrics (sglang:* names, rank 0 only) for the site's monitoring; METRICS=0 turns them off
+[ "${METRICS:-1}" = 1 ] && export EXTRA_ARGS="--enable-metrics${EXTRA_ARGS:+ $EXTRA_ARGS}"
 # CUDA_LOG=1 puts CUDA driver error details in the container log (off by default; turn it on to chase a driver error)
 exec bash "$(dirname "$0")/launch-sgl-dsv41.sh" "$@"
